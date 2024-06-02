@@ -28,6 +28,7 @@
 
 #include "FNA3D_Driver.h"
 #include "FNA3D_Driver_OpenGL.h"
+#include "FNA3D_Driver_OpenGL_shaders.h"
 #ifdef __vita__
 #include "FNA3D_Driver_OpenGL_vita.h"
 #endif
@@ -160,6 +161,7 @@ typedef struct OpenGLBackbuffer
 		GLuint texture;
 		GLuint colorAttachment;
 		GLuint depthStencilAttachment;
+		GLenum filter;
 	} opengl;
 } OpenGLBackbuffer;
 
@@ -179,7 +181,7 @@ typedef struct OpenGLRenderer /* Cast from FNA3D_Renderer* */
 
 	/* Context */
 	SDL_GLContext context;
-	uint8_t useES3;
+	uint8_t useES2;
 	uint8_t useCoreProfile;
 
 	/* FIXME: https://github.com/KhronosGroup/EGL-Registry/pull/113 */
@@ -323,6 +325,10 @@ typedef struct OpenGLRenderer /* Cast from FNA3D_Renderer* */
 	SDL_Mutex *disposeEffectsLock;
 	OpenGLQuery *disposeQueries;
 	SDL_Mutex *disposeQueriesLock;
+
+	/* Shaders for BlitBuffer emulation. */
+	GLuint blitBufferProg;
+	GLuint blitBufferVAO, blitBufferVBO;
 
 	/* GL entry points */
 	glfntype_glGetString glGetString; /* Loaded early! */
@@ -1067,7 +1073,10 @@ static inline void BindReadFramebuffer(OpenGLRenderer *renderer, GLuint handle)
 {
 	if (handle != renderer->currentReadFramebuffer)
 	{
-		renderer->glBindFramebuffer(GL_READ_FRAMEBUFFER, handle);
+		if (renderer->supports_NonES2)
+		{
+			renderer->glBindFramebuffer(GL_READ_FRAMEBUFFER, handle);
+		}
 		renderer->currentReadFramebuffer = handle;
 	}
 }
@@ -1076,7 +1085,10 @@ static inline void BindDrawFramebuffer(OpenGLRenderer *renderer, GLuint handle)
 {
 	if (handle != renderer->currentDrawFramebuffer)
 	{
-		renderer->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, handle);
+		renderer->glBindFramebuffer(
+			renderer->supports_NonES2 ? GL_DRAW_FRAMEBUFFER : GL_FRAMEBUFFER,
+			handle
+		);
 		renderer->currentDrawFramebuffer = handle;
 	}
 }
@@ -1092,12 +1104,18 @@ static inline void BindFramebuffer(OpenGLRenderer *renderer, GLuint handle)
 	}
 	else if (renderer->currentReadFramebuffer != handle)
 	{
-		renderer->glBindFramebuffer(GL_READ_FRAMEBUFFER, handle);
+		if (renderer->supports_NonES2)
+		{
+			renderer->glBindFramebuffer(GL_READ_FRAMEBUFFER, handle);
+		}
 		renderer->currentReadFramebuffer = handle;
 	}
 	else if (renderer->currentDrawFramebuffer != handle)
 	{
-		renderer->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, handle);
+		renderer->glBindFramebuffer(
+			renderer->supports_NonES2 ? GL_DRAW_FRAMEBUFFER : GL_FRAMEBUFFER,
+			handle
+		);
 		renderer->currentDrawFramebuffer = handle;
 	}
 }
@@ -1313,6 +1331,64 @@ static inline void DisposeResources(OpenGLRenderer *renderer)
 	#undef DISPOSE
 }
 
+static void BlitFramebuffer(
+	FNA3D_Renderer *driverData,
+	GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+	GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
+	GLbitfield mask, GLenum filter
+) {
+	OpenGLRenderer *renderer = (OpenGLRenderer*) driverData;
+
+	/*
+	 * If we have glBlitFramebuffer, we can just use it, otherwise
+	 * we are forced to do this whole song and dance to emulate the
+	 * behavior.
+	 */
+	if (renderer->supports_EXT_framebuffer_blit)
+	{
+		renderer->glBlitFramebuffer(
+			srcX0, srcY0, srcX1, srcY1,
+			dstX0, dstY0, dstX1, dstY1,
+			mask, filter
+		);
+	}
+	else
+	{
+		GLint prog = 0;
+		renderer->glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+
+		// Setup viewport
+		renderer->glUseProgram(renderer->blitBufferProg);
+		renderer->glActiveTexture(GL_TEXTURE0);
+		renderer->glBindTexture(GL_TEXTURE_2D, renderer->backbuffer->opengl.texture);
+		if (renderer->backbuffer->opengl.filter != filter)
+		{
+			renderer->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+			renderer->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+			renderer->backbuffer->opengl.filter = filter;
+		}
+		renderer->glViewport(dstX0, dstY0, dstX1 - dstX0, dstY1 - dstY0);
+		renderer->glScissor(dstX0, dstY0, dstX1 - dstX0, dstY1 - dstY0);
+		renderer->glBindVertexArray(renderer->blitBufferVAO);
+		renderer->glBindBuffer(GL_ARRAY_BUFFER, renderer->blitBufferVBO);
+		renderer->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+		// Reset changed states
+		renderer->glUseProgram(prog);
+		renderer->glBindTexture(renderer->textures[0]->target, renderer->textures[0]->handle);
+		renderer->glViewport(
+			renderer->viewport.x, renderer->viewport.y,
+			renderer->viewport.w, renderer->viewport.h
+		);
+		renderer->glScissor(
+			renderer->scissorRect.x, renderer->scissorRect.y,
+			renderer->scissorRect.w, renderer->scissorRect.h
+		);
+		renderer->glBindVertexArray(renderer->vao);
+		renderer->glBindBuffer(GL_ARRAY_BUFFER, renderer->currentVertexBuffer);
+	}
+}
+
 static void OPENGL_SwapBuffers(
 	FNA3D_Renderer *driverData,
 	FNA3D_Rect *sourceRectangle,
@@ -1403,14 +1479,15 @@ static void OPENGL_SwapBuffers(
 				0
 			);
 			BindReadFramebuffer(renderer, renderer->backbuffer->opengl.handle);
-			renderer->glBlitFramebuffer(
+			BlitFramebuffer(
+				driverData,
 				0, 0, renderer->backbuffer->width, renderer->backbuffer->height,
 				0, 0, renderer->backbuffer->width, renderer->backbuffer->height,
 				GL_COLOR_BUFFER_BIT,
 				GL_LINEAR
 			);
 			/* Invalidate the MSAA faux-backbuffer */
-			if (renderer->supports_ARB_invalidate_subdata)
+			if (renderer->supports_ARB_invalidate_subdata && renderer->supports_NonES2)
 			{
 				renderer->glInvalidateFramebuffer(
 					GL_READ_FRAMEBUFFER,
@@ -1426,14 +1503,15 @@ static void OPENGL_SwapBuffers(
 		}
 		BindDrawFramebuffer(renderer, renderer->realBackbufferFBO);
 
-		renderer->glBlitFramebuffer(
+		BlitFramebuffer(
+			driverData,
 			srcX, srcY, srcW, srcH,
 			dstX, dstY, dstW, dstH,
 			GL_COLOR_BUFFER_BIT,
 			renderer->backbufferScaleMode
 		);
 		/* Invalidate the faux-backbuffer */
-		if (renderer->supports_ARB_invalidate_subdata)
+		if (renderer->supports_ARB_invalidate_subdata && renderer->supports_NonES2)
 		{
 			renderer->glInvalidateFramebuffer(
 				GL_READ_FRAMEBUFFER,
@@ -1617,12 +1695,21 @@ static void OPENGL_DrawIndexedPrimitives(
 			baseVertex
 		);
 	}
-	else
+	else if (renderer->supports_NonES2)
 	{
 		renderer->glDrawRangeElements(
 			XNAToGL_Primitive[primitiveType],
 			minVertexIndex,
 			minVertexIndex + numVertices - 1,
+			PrimitiveVerts(primitiveType, primitiveCount),
+			XNAToGL_IndexType[indexElementSize],
+			(void*) (size_t) (startIndex * IndexSize(indexElementSize))
+		);
+	}
+	else
+	{
+		renderer->glDrawElements(
+			XNAToGL_Primitive[primitiveType],
 			PrimitiveVerts(primitiveType, primitiveCount),
 			XNAToGL_IndexType[indexElementSize],
 			(void*) (size_t) (startIndex * IndexSize(indexElementSize))
@@ -2348,7 +2435,7 @@ static void OPENGL_VerifySampler(
 			XNAToGL_Wrap[tex->wrapT]
 		);
 	}
-	if (sampler->addressW != tex->wrapR)
+	if ((sampler->addressW != tex->wrapR) && renderer->supports_NonES2)
 	{
 		tex->wrapR = sampler->addressW;
 		renderer->glTexParameteri(
@@ -2385,23 +2472,26 @@ static void OPENGL_VerifySampler(
 			);
 		}
 	}
-	if (sampler->maxMipLevel != tex->maxMipmapLevel)
+	if (!renderer->useES2)
 	{
-		tex->maxMipmapLevel = sampler->maxMipLevel;
-		renderer->glTexParameteri(
-			tex->target,
-			GL_TEXTURE_BASE_LEVEL,
-			tex->maxMipmapLevel
-		);
-	}
-	if (sampler->mipMapLevelOfDetailBias != tex->lodBias && !renderer->useES3)
-	{
-		tex->lodBias = sampler->mipMapLevelOfDetailBias;
-		renderer->glTexParameterf(
-			tex->target,
-			GL_TEXTURE_LOD_BIAS,
-			tex->lodBias
-		);
+		if (sampler->maxMipLevel != tex->maxMipmapLevel)
+		{
+			tex->maxMipmapLevel = sampler->maxMipLevel;
+			renderer->glTexParameteri(
+				tex->target,
+				GL_TEXTURE_BASE_LEVEL,
+				tex->maxMipmapLevel
+			);
+		}
+		if (sampler->mipMapLevelOfDetailBias != tex->lodBias)
+		{
+			tex->lodBias = sampler->mipMapLevelOfDetailBias;
+			renderer->glTexParameterf(
+				tex->target,
+				GL_TEXTURE_LOD_BIAS,
+				tex->lodBias
+			);
+		}
 	}
 
 	if (index != 0)
@@ -2737,8 +2827,19 @@ static void OPENGL_SetRenderTargets(
 #ifndef __vita__
 	if (numRenderTargets != renderer->currentDrawBuffers)
 	{
-		renderer->glDrawBuffers(numRenderTargets, renderer->drawBuffersArray);
-		renderer->currentDrawBuffers = numRenderTargets;
+		if (!renderer->supports_NonES2)
+		{
+			if (numRenderTargets > 1)
+			{
+				FNA3D_LogError("Your hardware does not support multiple rendertargets!");
+				return;
+			}
+		}
+		else
+		{
+			renderer->glDrawBuffers(numRenderTargets, renderer->drawBuffersArray);
+			renderer->currentDrawBuffers = numRenderTargets;
+		}
 	}
 #endif
 
@@ -2841,14 +2942,15 @@ static void OPENGL_ResolveTarget(
 			renderer->glDisable(GL_SCISSOR_TEST);
 		}
 		BindDrawFramebuffer(renderer, renderer->resolveFramebufferDraw);
-		renderer->glBlitFramebuffer(
+		BlitFramebuffer(
+			driverData,
 			0, 0, width, height,
 			0, 0, width, height,
 			GL_COLOR_BUFFER_BIT,
 			GL_LINEAR
 		);
 		/* Invalidate the MSAA buffer */
-		if (renderer->supports_ARB_invalidate_subdata)
+		if (renderer->supports_ARB_invalidate_subdata && renderer->supports_NonES2)
 		{
 			renderer->glInvalidateFramebuffer(
 				GL_READ_FRAMEBUFFER,
@@ -2876,6 +2978,73 @@ static void OPENGL_ResolveTarget(
 
 /* Backbuffer Functions */
 
+static void OPENGL_INTERNAL_CreateBackbufferColorStorage(
+	OpenGLRenderer *renderer,
+	FNA3D_PresentationParameters *parameters
+) {
+	if (renderer->supports_EXT_framebuffer_blit)
+	{
+		if (renderer->backbuffer->multiSampleCount > 0)
+		{
+			renderer->glRenderbufferStorageMultisample(
+				GL_RENDERBUFFER,
+				renderer->backbuffer->multiSampleCount,
+				GL_RGBA8,
+				renderer->backbuffer->width,
+				renderer->backbuffer->height
+			);
+		}
+		else
+		{
+			renderer->glRenderbufferStorage(
+				GL_RENDERBUFFER,
+				GL_RGBA8,
+				renderer->backbuffer->width,
+				renderer->backbuffer->height
+			);
+		}
+		renderer->glFramebufferRenderbuffer(
+			GL_FRAMEBUFFER,
+			GL_COLOR_ATTACHMENT0,
+			GL_RENDERBUFFER,
+			renderer->backbuffer->opengl.colorAttachment
+		);
+	}
+	else
+	{
+		/* If we're emulating the BlitFramebuffer, we need to always have a texture
+		 * attached, lest we can't draw it.
+		 */
+		renderer->glGenTextures(1, &renderer->backbuffer->opengl.texture);
+		renderer->glBindTexture(GL_TEXTURE_2D, renderer->backbuffer->opengl.texture);
+		renderer->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+		renderer->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+		renderer->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		renderer->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		renderer->backbuffer->opengl.filter = GL_LINEAR;
+
+		renderer->glTexImage2D(
+			GL_TEXTURE_2D,
+			0,
+			GL_RGBA,
+			renderer->backbuffer->width,
+			renderer->backbuffer->height,
+			0,
+			GL_RGBA,
+			GL_UNSIGNED_BYTE,
+			NULL
+		);
+
+		renderer->glFramebufferTexture2D(
+			GL_FRAMEBUFFER,
+			GL_COLOR_ATTACHMENT0,
+			GL_TEXTURE_2D,
+			renderer->backbuffer->opengl.texture,
+			0
+		);
+	}
+}
+
 static void OPENGL_INTERNAL_CreateBackbuffer(
 	OpenGLRenderer *renderer,
 	FNA3D_PresentationParameters *parameters
@@ -2897,14 +3066,6 @@ static void OPENGL_INTERNAL_CreateBackbuffer(
 		if (	renderer->backbuffer == NULL ||
 			renderer->backbuffer->type == BACKBUFFER_TYPE_NULL	)
 		{
-			if (!renderer->supports_EXT_framebuffer_blit)
-			{
-				FNA3D_LogError(
-					"Your hardware does not support the faux-backbuffer!"
-					"\n\nKeep the window/backbuffer resolution the same."
-				);
-				return;
-			}
 			if (renderer->backbuffer != NULL)
 			{
 				SDL_free(renderer->backbuffer);
@@ -2940,31 +3101,8 @@ static void OPENGL_INTERNAL_CreateBackbuffer(
 				GL_RENDERBUFFER,
 				renderer->backbuffer->opengl.colorAttachment
 			);
-			if (renderer->backbuffer->multiSampleCount > 0)
-			{
-				renderer->glRenderbufferStorageMultisample(
-					GL_RENDERBUFFER,
-					renderer->backbuffer->multiSampleCount,
-					GL_RGBA8,
-					renderer->backbuffer->width,
-					renderer->backbuffer->height
-				);
-			}
-			else
-			{
-				renderer->glRenderbufferStorage(
-					GL_RENDERBUFFER,
-					GL_RGBA8,
-					renderer->backbuffer->width,
-					renderer->backbuffer->height
-				);
-			}
-			renderer->glFramebufferRenderbuffer(
-				GL_FRAMEBUFFER,
-				GL_COLOR_ATTACHMENT0,
-				GL_RENDERBUFFER,
-				renderer->backbuffer->opengl.colorAttachment
-			);
+
+			OPENGL_INTERNAL_CreateBackbufferColorStorage(renderer, parameters);
 
 			if (renderer->backbuffer->depthFormat == FNA3D_DEPTHFORMAT_NONE)
 			{
@@ -3089,31 +3227,8 @@ static void OPENGL_INTERNAL_CreateBackbuffer(
 				GL_RENDERBUFFER,
 				renderer->backbuffer->opengl.colorAttachment
 			);
-			if (renderer->backbuffer->multiSampleCount > 0)
-			{
-				renderer->glRenderbufferStorageMultisample(
-					GL_RENDERBUFFER,
-					renderer->backbuffer->multiSampleCount,
-					GL_RGBA8,
-					renderer->backbuffer->width,
-					renderer->backbuffer->height
-				);
-			}
-			else
-			{
-				renderer->glRenderbufferStorage(
-					GL_RENDERBUFFER,
-					GL_RGBA8,
-					renderer->backbuffer->width,
-					renderer->backbuffer->height
-				);
-			}
-			renderer->glFramebufferRenderbuffer(
-				GL_FRAMEBUFFER,
-				GL_COLOR_ATTACHMENT0,
-				GL_RENDERBUFFER,
-				renderer->backbuffer->opengl.colorAttachment
-			);
+
+			OPENGL_INTERNAL_CreateBackbufferColorStorage(renderer, parameters);
 
 			/* Generate/Delete depth/stencil attachment, if needed */
 			if (parameters->depthStencilFormat == FNA3D_DEPTHFORMAT_NONE)
@@ -3257,7 +3372,7 @@ static uint8_t OPENGL_INTERNAL_ReadTargetIfApplicable(
 	OpenGLTexture *texture = (OpenGLTexture*) textureIn;
 	uint8_t texUnbound = (	renderer->currentDrawBuffers != 1 ||
 				renderer->currentAttachments[0] != texture->handle	);
-	if (texUnbound && !renderer->useES3)
+	if (texUnbound && !renderer->useES2)
 	{
 		return 0;
 	}
@@ -3438,7 +3553,8 @@ static void OPENGL_ReadBackbuffer(
 			0
 		);
 		BindReadFramebuffer(renderer, renderer->backbuffer->opengl.handle);
-		renderer->glBlitFramebuffer(
+		BlitFramebuffer(
+			driverData,
 			0, 0, renderer->backbuffer->width, renderer->backbuffer->height,
 			0, 0, renderer->backbuffer->width, renderer->backbuffer->height,
 			GL_COLOR_BUFFER_BIT,
@@ -3549,14 +3665,14 @@ static inline OpenGLTexture* OPENGL_INTERNAL_CreateTexture(
 		GL_TEXTURE_WRAP_T,
 		XNAToGL_Wrap[result->wrapT]
 	);
-	/* VITATODO: check if this can be implemented in any other way */
-#ifndef __vita__
-	renderer->glTexParameteri(
-		result->target,
-		GL_TEXTURE_WRAP_R,
-		XNAToGL_Wrap[result->wrapR]
-	);
-#endif
+	if (renderer->supports_NonES2)
+	{
+		renderer->glTexParameteri(
+			result->target,
+			GL_TEXTURE_WRAP_R,
+			XNAToGL_Wrap[result->wrapR]
+		);
+	}
 	renderer->glTexParameteri(
 		result->target,
 		GL_TEXTURE_MAG_FILTER,
@@ -3579,13 +3695,13 @@ static inline OpenGLTexture* OPENGL_INTERNAL_CreateTexture(
 				1.0f
 		);
 	}
-	renderer->glTexParameteri(
-		result->target,
-		GL_TEXTURE_BASE_LEVEL,
-		result->maxMipmapLevel
-	);
-	if (!renderer->useES3)
+	if (!renderer->useES2)
 	{
+		renderer->glTexParameteri(
+			result->target,
+			GL_TEXTURE_BASE_LEVEL,
+			result->maxMipmapLevel
+		);
 		renderer->glTexParameterf(
 			result->target,
 			GL_TEXTURE_LOD_BIAS,
@@ -3674,6 +3790,12 @@ static FNA3D_Texture* OPENGL_CreateTexture2D(
 		glType = XNAToGL_TextureDataType[format];
 		for (i = 0; i < levelCount; i += 1)
 		{
+			// ES2.0 does not support sized internal formats.
+			if (!renderer->supports_NonES2)
+			{
+				glInternalFormat = glFormat;
+			}
+
 			renderer->glTexImage2D(
 				GL_TEXTURE_2D,
 				i,
@@ -3812,6 +3934,12 @@ static FNA3D_Texture* OPENGL_CreateTextureCube(
 	else
 	{
 		GLenum glType = XNAToGL_TextureDataType[format];
+		// ES2.0 does not support sized internal formats.
+		if (!renderer->supports_NonES2)
+		{
+			glInternalFormat = glFormat;
+		}
+
 		for (i = 0; i < 6; i += 1)
 		{
 			for (l = 0; l < levelCount; l += 1)
@@ -5504,8 +5632,8 @@ static inline void LoadEntryPoints(
 ) {
 	int32_t i;
 	const char *baseErrorString = (
-		renderer->useES3 ?
-			"OpenGL ES 3.0 support is required!" :
+		renderer->useES2 ?
+			"OpenGL ES 2.0 support is required!" :
 			"OpenGL 2.1 support is required!"
 	);
 
@@ -5598,8 +5726,8 @@ static inline void LoadEntryPoints(
 		return;
 	}
 
-	/* Some stuff is okay for ES3, not for desktop. */
-	if (renderer->useES3)
+	/* Some stuff is okay for ES2, not for desktop. */
+	if (renderer->useES2)
 	{
 		if (!renderer->supports_3DTexture)
 		{
@@ -5630,7 +5758,7 @@ static inline void LoadEntryPoints(
 	{
 		if (	!renderer->supports_3DTexture ||
 			!renderer->supports_ARB_occlusion_query ||
-			!renderer->supports_NonES3	)
+			!renderer->supports_NonES2	)
 		{
 			FNA3D_LogError(
 				"%s\n%s",
@@ -5642,7 +5770,7 @@ static inline void LoadEntryPoints(
 	}
 
 	/* AKA: The shitty TexEnvi check */
-	if (	!renderer->useES3 &&
+	if (	!renderer->useES2 &&
 		!renderer->useCoreProfile &&
 		!renderer->supports_NonES3NonCore	)
 	{
@@ -5747,6 +5875,14 @@ static inline void LoadEntryPoints(
 			"GREMEDY_string_marker not supported!"
 		);
 	}
+
+	if (!renderer->supports_EXT_framebuffer_blit)
+	{
+		FNA3D_LogWarn(
+			"Your hardware does not support faux-backbuffers!"
+			"\nBehavior will be emulated."
+		);
+	}
 }
 
 static void* MOJOSHADERCALL GLGetProcAddress(const char *ep, void* d)
@@ -5808,13 +5944,14 @@ static inline void CheckExtensions(
 
 static uint8_t OPENGL_PrepareWindowAttributes(uint32_t *flags)
 {
-	uint8_t forceES3, forceCore, forceCompat;
+	uint8_t forceES3, forceES2, forceCore, forceCompat;
 	const char *osVersion;
 	int32_t depthSize, stencilSize;
 	const char *depthFormatHint;
 
 	/* GLContext environment variables */
 	forceES3 = SDL_GetHintBoolean("FNA3D_OPENGL_FORCE_ES3", 0);
+	forceES2 = SDL_GetHintBoolean("FNA3D_OPENGL_FORCE_ES2", 0);
 	forceCore = SDL_GetHintBoolean("FNA3D_OPENGL_FORCE_CORE_PROFILE", 0);
 	forceCompat = SDL_GetHintBoolean("FNA3D_OPENGL_FORCE_COMPATIBILITY_PROFILE", 0);
 
@@ -5875,6 +6012,17 @@ static uint8_t OPENGL_PrepareWindowAttributes(uint32_t *flags)
 			SDL_GL_CONTEXT_PROFILE_ES
 		);
 	}
+	else if (forceES2)
+	{
+		SDL_GL_SetAttribute(SDL_GL_RETAINED_BACKING, 0);
+		SDL_GL_SetAttribute(SDL_GL_ACCELERATED_VISUAL, 1);
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+		SDL_GL_SetAttribute(
+			SDL_GL_CONTEXT_PROFILE_MASK,
+			SDL_GL_CONTEXT_PROFILE_ES
+		);
+	}
 	else if (forceCore)
 	{
 		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
@@ -5910,6 +6058,27 @@ static uint8_t OPENGL_PrepareWindowAttributes(uint32_t *flags)
 
 	*flags = SDL_WINDOW_OPENGL;
 	return 1;
+}
+
+static GLuint LoadShader(
+	OpenGLRenderer *renderer,
+	GLenum type,
+	const char* shaderSrc
+) {
+	GLchar msg[2048];
+	GLint compiled;
+	GLuint shader;
+	shader = renderer->glCreateShader(type);
+	renderer->glShaderSource(shader, 1, &shaderSrc, NULL);
+	renderer->glCompileShader(shader);
+	renderer->glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+	if (!compiled) {
+		renderer->glGetShaderInfoLog(shader, sizeof(msg), NULL, msg);
+		FNA3D_LogError("Error compiling shader:\n%s\n", msg);
+		return 0;
+	}
+
+	return shader;
 }
 
 FNA3D_Device* OPENGL_CreateDevice(
@@ -5956,11 +6125,11 @@ FNA3D_Device* OPENGL_CreateDevice(
 
 	/* Check for a possible ES/Core context */
 	SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &flags);
-	renderer->useES3 = (flags & SDL_GL_CONTEXT_PROFILE_ES) != 0;
+	renderer->useES2 = (flags & SDL_GL_CONTEXT_PROFILE_ES) != 0;
 	renderer->useCoreProfile = (flags & SDL_GL_CONTEXT_PROFILE_CORE) != 0;
 
 	/* Check for EGL-based contexts */
-	renderer->isEGL = (	renderer->useES3 ||
+	renderer->isEGL = (	renderer->useES2 ||
 				SDL_strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0	);
 
 	/* Check for a possible debug context */
@@ -6161,6 +6330,44 @@ FNA3D_Device* OPENGL_CreateDevice(
 	/* Initialize the faux backbuffer */
 	OPENGL_INTERNAL_CreateBackbuffer(renderer, presentationParameters);
 
+	/* If we're emulating the BlitBuffer we need some resources. */
+	if (!renderer->supports_EXT_framebuffer_blit)
+	{
+		GLchar msg[2048];
+		GLint progStatus;
+		GLuint vertexPosAttr, textureUniform;
+		GLuint vertShader = LoadShader(renderer, GL_VERTEX_SHADER, OPENGL_QUAD_VS);
+		GLuint fragShader = LoadShader(renderer, GL_FRAGMENT_SHADER, OPENGL_QUAD_FS);
+		renderer->blitBufferProg = renderer->glCreateProgram();
+		renderer->glAttachShader(renderer->blitBufferProg, vertShader);
+		renderer->glAttachShader(renderer->blitBufferProg, fragShader);
+		renderer->glLinkProgram(renderer->blitBufferProg);
+
+		renderer->glGetProgramiv(renderer->blitBufferProg, GL_LINK_STATUS, &progStatus);
+		if (!progStatus)
+		{
+			renderer->glGetProgramInfoLog(renderer->blitBufferProg, sizeof(msg), NULL, msg);
+			FNA3D_LogError("Error linking program:\n%s\n", msg);
+		}
+
+		vertexPosAttr = renderer->glGetAttribLocation(renderer->blitBufferProg, "a_position");
+		textureUniform = renderer->glGetUniformLocation(renderer->blitBufferProg, "s_texture");
+
+		renderer->glUseProgram(renderer->blitBufferProg);
+		renderer->glGenVertexArrays(1, &renderer->blitBufferVAO);
+		renderer->glGenBuffers(1, &renderer->blitBufferVBO);
+
+		renderer->glBindVertexArray(renderer->blitBufferVAO);
+		renderer->glBindBuffer(GL_ARRAY_BUFFER, renderer->blitBufferVBO);
+		renderer->glEnableVertexAttribArray(vertexPosAttr);
+		renderer->glVertexAttribPointer(vertexPosAttr, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), (const void*)0);
+		renderer->glBufferData(GL_ARRAY_BUFFER, sizeof(OPENGL_QUAD_VERTS), OPENGL_QUAD_VERTS, GL_STATIC_DRAW);
+
+		renderer->glUniform1i(textureUniform, 0);
+		renderer->glBindVertexArray(renderer->vao);
+		renderer->glUseProgram(0);
+	}
+
 	/* Initialize texture collection array */
 	renderer->glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &numSamplers);
 	numSamplers = SDL_min(
@@ -6201,7 +6408,14 @@ FNA3D_Device* OPENGL_CreateDevice(
 	renderer->numVertexAttributes = numAttributes;
 
 	/* Initialize render target FBO and state arrays */
-	renderer->glGetIntegerv(GL_MAX_DRAW_BUFFERS, &numAttachments);
+	if (renderer->supports_NonES2)
+	{
+		renderer->glGetIntegerv(GL_MAX_DRAW_BUFFERS, &numAttachments);
+	}
+	else
+	{
+		numAttachments = 1;
+	}
 	numAttachments = SDL_min(numAttachments, MAX_RENDERTARGET_BINDINGS);
 	for (i = 0; i < numAttachments; i += 1)
 	{
@@ -6211,7 +6425,7 @@ FNA3D_Device* OPENGL_CreateDevice(
 		renderer->currentAttachmentTypes[i] = GL_TEXTURE_2D;
 		renderer->drawBuffersArray[i] = GL_COLOR_ATTACHMENT0 + i;
 	}
-	renderer->numAttachments = numAttachments;
+		renderer->numAttachments = numAttachments;
 
 	renderer->drawBuffersArray[numAttachments] = GL_DEPTH_ATTACHMENT;
 	renderer->drawBuffersArray[numAttachments + 1] = GL_STENCIL_ATTACHMENT;
@@ -6225,7 +6439,7 @@ FNA3D_Device* OPENGL_CreateDevice(
 		renderer->glGenVertexArrays(1, &renderer->vao);
 		renderer->glBindVertexArray(renderer->vao);
 	}
-	else if (!renderer->useES3)
+	else if (!renderer->useES2)
 	{
 		/* Compatibility contexts require that point sprites be enabled
 		 * explicitly. However, drivers (and the Steam overlay) are
