@@ -510,7 +510,6 @@ FNA3DAPI uint32_t FNA3D_PrepareWindowAttributes(void);
 
 /* After your device is created, call this to check for high-DPI support.
  *
- * NOTE: This call is now deprecated, in favor of SDL_GetWindowSizeInPixels!
  *
  * Note that this will NOT work if it's called after the window is created but
  * before the device! Not all platforms create drawable surfaces at the same
@@ -520,7 +519,6 @@ FNA3DAPI uint32_t FNA3D_PrepareWindowAttributes(void);
  * w:		Filled with the width of the window's drawable canvas.
  * h:		Filled with the height of the window's drawable canvas.
  */
-FNA3DDEPRECATED("Use SDL_GetWindowSizeInPixels instead!")
 FNA3DAPI void FNA3D_GetDrawableSize(void* window, int32_t *w, int32_t *h);
 
 /* Creates a rendering context for use on the calling thread.

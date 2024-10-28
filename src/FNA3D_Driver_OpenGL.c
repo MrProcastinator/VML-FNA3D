@@ -49,6 +49,11 @@ static inline SDL_threadID SDL_GetCurrentThreadID()
 #include <SDL_syswm.h>
 #endif /* SDL_VIDEO_DRIVER_UIKIT */
 
+/* Compatibility with PSVita (no SDL 2.26.0 support) */
+#ifdef __vita__
+#define SDL_GetWindowSizeInPixels SDL_GetWindowSize
+#endif
+
 /* Internal Structures */
 
 typedef struct FNA3D_Command FNA3D_Command; /* See Threading Support section */
