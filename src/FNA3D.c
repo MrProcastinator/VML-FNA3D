@@ -33,9 +33,12 @@
 #include <SDL.h>
 #endif
 
+/* VITATODO: downgrade to SDL2  */
+#ifndef __vita__
 #if !SDL_VERSION_ATLEAST(2, 26, 0)
 #error "SDL version older than 2.26.0"
 #endif /* !SDL_VERSION_ATLEAST */
+#endif
 
 /* Drivers */
 
@@ -178,7 +181,7 @@ uint32_t FNA3D_PrepareWindowAttributes(void)
 
 FNA3DAPI void FNA3D_GetDrawableSize(void* window, int32_t *w, int32_t *h)
 {
-	SDL_GetWindowSizeInPixels((SDL_Window*) window, w, h);
+	SDL_GetWindowSize((SDL_Window*) window, w, h);
 }
 
 /* Init/Quit */

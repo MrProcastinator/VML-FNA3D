@@ -1,6 +1,19 @@
 # CMake Project for FNA3D
 # Written by @NeroBurner
 cmake_minimum_required(VERSION 2.8.12)
+
+set(VITA OFF CACHE BOOL "Build for PSVita")
+
+if(VITA)
+	if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+		if(DEFINED ENV{VITASDK})
+			set(CMAKE_TOOLCHAIN_FILE "$ENV{VITASDK}/share/vita.toolchain.cmake" CACHE PATH "toolchain file")
+		else()
+			message(FATAL_ERROR "Please define VITASDK to point to your SDK path!")
+		endif()
+	endif()
+endif()
+
 project(FNA3D C)
 
 # Options
@@ -48,12 +61,18 @@ else()
 endif()
 
 # Defines
-add_definitions(
-	-DFNA3D_DRIVER_VULKAN
-	-DFNA3D_DRIVER_OPENGL
-)
-if(BUILD_SDL3)
-	add_definitions(-DFNA3D_DRIVER_SDL)
+if(VITA)
+	add_definitions(
+		-DFNA3D_DRIVER_OPENGL
+	)
+else()
+	add_definitions(
+		-DFNA3D_DRIVER_VULKAN
+		-DFNA3D_DRIVER_OPENGL
+	)
+	if(BUILD_SDL3)
+		add_definitions(-DFNA3D_DRIVER_SDL)
+	endif()
 endif()
 add_definitions(
 	-DMOJOSHADER_NO_VERSION_INCLUDE
@@ -97,6 +116,41 @@ if(EMSCRIPTEN)
 		-DSUPPORT_PROFILE_SPIRV=0
 	)
 endif()
+if(VITA)
+	set(FNA3D_DRIVER_HEADERS
+		src/FNA3D_Driver_OpenGL.h
+		src/FNA3D_Driver_OpenGL_glfuncs.h
+	)
+	set(FNA3D_DRIVER_SOURCES
+		src/FNA3D_Driver_OpenGL.c
+	)
+	set(MOJOSHADER_DRIVER_SOURCES
+		MojoShader/mojoshader_opengl.c
+	)
+else()
+	set(FNA3D_DRIVER_HEADERS
+		src/FNA3D_Driver_OpenGL.h
+		src/FNA3D_Driver_OpenGL_glfuncs.h
+		src/FNA3D_Driver_Vulkan_vkfuncs.h
+	)
+	set(FNA3D_DRIVER_SOURCES
+		src/FNA3D_Driver_D3D11.c
+		src/FNA3D_Driver_OpenGL.c
+		src/FNA3D_Driver_SDL.c
+		src/FNA3D_Driver_Vulkan.c
+	)
+	set(MOJOSHADER_DRIVER_SOURCES
+		MojoShader/mojoshader_d3d11.c
+		MojoShader/mojoshader_opengl.c
+		MojoShader/mojoshader_vulkan.c
+		MojoShader/mojoshader_sdlgpu.c
+	)
+endif()
+
+# PSVita VML C flags
+if(VITA)
+	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -marm -mtune=cortex-a9 -mfpu=neon -Wno-incompatible-pointer-types -Wno-stringop-overflow -Wno-deprecated-declarations -Wl,-q -O3 -Wall")
+endif()
 
 # Source lists
 add_library(FNA3D
@@ -105,18 +159,13 @@ add_library(FNA3D
 	include/FNA3D_Image.h
 	# Internal Headers
 	src/FNA3D_Driver.h
-	src/FNA3D_Driver_OpenGL.h
-	src/FNA3D_Driver_OpenGL_glfuncs.h
-	src/FNA3D_Driver_Vulkan_vkfuncs.h
+	${FNA3D_DRIVER_HEADERS}
 	src/FNA3D_CommandBuffer.h
 	src/FNA3D_Memory.h
 	src/FNA3D_PipelineCache.h
 	# Source Files
 	src/FNA3D.c
-	src/FNA3D_Driver_D3D11.c
-	src/FNA3D_Driver_OpenGL.c
-	src/FNA3D_Driver_SDL.c
-	src/FNA3D_Driver_Vulkan.c
+	${FNA3D_DRIVER_SOURCES}
 	src/FNA3D_Image.c
 	src/FNA3D_CommandBuffer.c
 	src/FNA3D_Memory.c
@@ -127,10 +176,7 @@ add_library(mojoshader STATIC
 	MojoShader/mojoshader.c
 	MojoShader/mojoshader_effects.c
 	MojoShader/mojoshader_common.c
-	MojoShader/mojoshader_d3d11.c
-	MojoShader/mojoshader_opengl.c
-	MojoShader/mojoshader_vulkan.c
-	MojoShader/mojoshader_sdlgpu.c
+	${MOJOSHADER_DRIVER_SOURCES}
 	MojoShader/profiles/mojoshader_profile_common.c
 	MojoShader/profiles/mojoshader_profile_glsl.c
 	MojoShader/profiles/mojoshader_profile_hlsl.c
@@ -232,3 +278,8 @@ else()
 		endif()
 	endif()
 endif()
+
+install(
+	TARGETS FNA3D mojoshader
+	DESTINATION lib
+)
