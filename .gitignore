@@ -3,9 +3,11 @@
 *.dll
 *.dylib
 .vs/
+.vscode/
 obj/
 Debug/
 Release/
+build*/
 *.vcxproj.user
 *.suo
 .DS_Store
