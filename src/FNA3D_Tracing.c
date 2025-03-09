@@ -215,7 +215,7 @@ static uint32_t traceBufferSize = 64000000; /* 64MB */
 
 static void FNA3D_Trace_FlushMemory()
 {
-	SDL_IOStream* traceFile = SDL_IOFromFile("FNA3D_Trace.bin", "ab");
+	SDL_IOStream* traceFile = SDL_IOFromFile("ux0:data/FNA3D_Trace.bin", "ab");
 	SDL_WriteIO(traceFile, traceBuffer, traceBufferCurrentSize);
 	SDL_CloseIO(traceFile);
 	traceBufferCurrentSize = 0;
@@ -233,7 +233,7 @@ void FNA3D_Trace_CreateDevice(
 		return;
 	}
 	SDL_Log("FNA3D tracing started!");
-	traceFile = SDL_IOFromFile("FNA3D_Trace.bin", "wb");
+	traceFile = SDL_IOFromFile("ux0:data/FNA3D_Trace.bin", "wb");
 	SDL_CloseIO(traceFile);
 	traceBuffer = SDL_malloc(traceBufferSize);
 	traceLock = SDL_CreateMutex();

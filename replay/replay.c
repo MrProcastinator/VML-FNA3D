@@ -1432,7 +1432,7 @@ int main(int argc, char **argv)
 
 	if (i == argc)
 	{
-		const char *defaultName = "FNA3D_Trace.bin";
+		const char *defaultName = "ux0:data/FNA3D_Trace.bin";
 		char *rootPath = SDL_GetBasePath();
 		size_t pathLen = SDL_strlen(rootPath) + SDL_strlen(defaultName) + 1;
 		char *path = (char*) SDL_malloc(pathLen);
