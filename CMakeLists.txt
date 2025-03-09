@@ -22,6 +22,12 @@ option(TRACING_SUPPORT "Build with tracing enabled" OFF)
 option(BUILD_SDL3 "Build against SDL 3.0" OFF)
 option(MOJOSHADER_STATIC_SPIRVCROSS "Build against statically linked spirvcross" OFF)
 
+# Vita only options
+if(VITA)
+	option(VITA_LOG_UNIMPLEMENTED "Log unimplemented functions" ON)
+	option(VITA_IGNORE_UNIMPLEMENTED "Ignore unimplemented functions instead of throwing error" ON)
+endif()
+
 # Version
 SET(LIB_MAJOR_VERSION "0")
 SET(LIB_MINOR_VERSION "24")
@@ -65,6 +71,12 @@ if(VITA)
 	add_definitions(
 		-DFNA3D_DRIVER_OPENGL
 	)
+	if(VITA_LOG_UNIMPLEMENTED)
+		add_definitions(-DFNA3D_VITA_LOG_UNIMPLEMENTED)
+	endif()
+	if(VITA_IGNORE_UNIMPLEMENTED)
+		add_definitions(-DFNA3D_VITA_IGNORE_UNIMPLEMENTED)
+	endif()
 else()
 	add_definitions(
 		-DFNA3D_DRIVER_VULKAN
@@ -127,6 +139,9 @@ if(VITA)
 	set(MOJOSHADER_DRIVER_SOURCES
 		MojoShader/mojoshader_opengl.c
 	)
+	set(FNA3D_VITA_SOURCES
+		src/FNA3D_Driver_OpenGL_vita.c
+	)
 else()
 	set(FNA3D_DRIVER_HEADERS
 		src/FNA3D_Driver_OpenGL.h
@@ -171,6 +186,7 @@ add_library(FNA3D
 	src/FNA3D_Memory.c
 	src/FNA3D_PipelineCache.c
 	src/FNA3D_Tracing.c
+	${FNA3D_VITA_SOURCES}
 )
 add_library(mojoshader STATIC
 	MojoShader/mojoshader.c

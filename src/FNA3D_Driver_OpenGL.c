@@ -28,6 +28,9 @@
 
 #include "FNA3D_Driver.h"
 #include "FNA3D_Driver_OpenGL.h"
+#ifdef __vita__
+#include "FNA3D_Driver_OpenGL_vita.h"
+#endif
 
 #ifdef USE_SDL3
 #include <SDL3/SDL.h>
@@ -1979,7 +1982,8 @@ static void OPENGL_SetBlendState(
 			(renderer->colorWriteEnable & FNA3D_COLORWRITECHANNELS_ALPHA) != 0
 		);
 	}
-
+	/* VITATODO: check if this can be implemented in any other way */
+#ifndef __VITA__
 	/* FIXME: So how exactly do we factor in
 	 * COLORWRITEENABLE for buffer 0? Do we just assume that
 	 * the default is just buffer 0, and all other calls
@@ -2044,6 +2048,7 @@ static void OPENGL_SetBlendState(
 		}
 		renderer->multiSampleMask = blendState->multiSampleMask;
 	}
+#endif /* __VITA__ */
 }
 
 static void OPENGL_SetDepthStencilState(
@@ -2255,11 +2260,14 @@ static void OPENGL_ApplyRasterizerState(
 	 * tell them to install Linux. Yes, really.
 	 * -flibit
 	 */
+	/* VITATODO: check if this can be implemented in any other way */
+#ifndef __vita__
 	if (rasterizerState->multiSampleAntiAlias != renderer->multiSampleEnable)
 	{
 		renderer->multiSampleEnable = rasterizerState->multiSampleAntiAlias;
 		ToggleGLState(renderer, GL_MULTISAMPLE, renderer->multiSampleEnable);
 	}
+#endif
 }
 
 static void OPENGL_VerifySampler(
@@ -2724,11 +2732,15 @@ static void OPENGL_SetRenderTargets(
 		}
 		i += 1;
 	}
+
+	/* VITATODO: check if this can be implemented in any other way */
+#ifndef __vita__
 	if (numRenderTargets != renderer->currentDrawBuffers)
 	{
 		renderer->glDrawBuffers(numRenderTargets, renderer->drawBuffersArray);
 		renderer->currentDrawBuffers = numRenderTargets;
 	}
+#endif
 
 	/* Update the depth/stencil attachment */
 	/* FIXME: Notice that we do separate attach calls for the stencil.
@@ -3537,11 +3549,14 @@ static inline OpenGLTexture* OPENGL_INTERNAL_CreateTexture(
 		GL_TEXTURE_WRAP_T,
 		XNAToGL_Wrap[result->wrapT]
 	);
+	/* VITATODO: check if this can be implemented in any other way */
+#ifndef __vita__
 	renderer->glTexParameteri(
 		result->target,
 		GL_TEXTURE_WRAP_R,
 		XNAToGL_Wrap[result->wrapR]
 	);
+#endif
 	renderer->glTexParameteri(
 		result->target,
 		GL_TEXTURE_MAG_FILTER,
@@ -3905,6 +3920,9 @@ static void OPENGL_SetTextureData2D(
 	glFormat = XNAToGL_TextureFormat[glTexture->format];
 	if (glFormat == GL_COMPRESSED_TEXTURE_FORMATS)
 	{
+#ifdef __vita__
+		SDL_assert(0 && "vitaGL doesn't support compressed texture formats!");
+#else
 		/* Note that we're using glInternalFormat, not glFormat.
 		 * In this case, they should actually be the same thing,
 		 * but we use glFormat somewhat differently for
@@ -3922,6 +3940,7 @@ static void OPENGL_SetTextureData2D(
 			dataLength,
 			data
 		);
+#endif
 	}
 	else
 	{
@@ -4049,6 +4068,9 @@ static void OPENGL_SetTextureDataCube(
 	glFormat = XNAToGL_TextureFormat[glTexture->format];
 	if (glFormat == GL_COMPRESSED_TEXTURE_FORMATS)
 	{
+#ifdef __vita__
+		SDL_assert(0 && "vitaGL doesn't support compressed texture formats!");
+#else
 		/* Note that we're using glInternalFormat, not glFormat.
 		 * In this case, they should actually be the same thing,
 		 * but we use glFormat somewhat differently for
@@ -4066,6 +4088,7 @@ static void OPENGL_SetTextureDataCube(
 			dataLength,
 			data
 		);
+#endif
 	}
 	else
 	{
@@ -5508,6 +5531,39 @@ static inline void LoadEntryPoints(
 #pragma GCC diagnostic ignored "-Wpedantic"
 	#include "FNA3D_Driver_OpenGL_glfuncs.h"
 #pragma GCC diagnostic pop
+
+#ifdef __vita__
+	/* Technically it doesn't completely, but we need to get other warnings */
+	renderer->supports_BaseGL = 1;
+	/* Loading stubs for VitaGL unimplemented functions */
+	#define GL_PROC_VITA(func)  { \
+			renderer->func = (glfntype_##func) &vitastub_##func; \
+			FNA3D_LogInfo("Added stub for %s at address: 0x%p", #func, &vitastub_##func); \
+		}
+		GL_PROC_VITA(glBlendColor)
+		GL_PROC_VITA(glDrawBuffers)
+		GL_PROC_VITA(glCompressedTexSubImage2D)
+		GL_PROC_VITA(glDrawElementsInstancedBaseVertex)
+		GL_PROC_VITA(glTexImage3D)
+		GL_PROC_VITA(glTexSubImage3D)
+		GL_PROC_VITA(glBeginQuery)
+		GL_PROC_VITA(glDeleteQueries)
+		GL_PROC_VITA(glEndQuery)
+		GL_PROC_VITA(glGenQueries)
+		GL_PROC_VITA(glGetQueryObjectuiv)
+		GL_PROC_VITA(glGetBufferSubData)
+		GL_PROC_VITA(glGetTexImage)
+		GL_PROC_VITA(glRenderbufferStorageMultisample)
+		GL_PROC_VITA(glGetInternalformativ)
+		GL_PROC_VITA(glInvalidateFramebuffer)
+		GL_PROC_VITA(glVertexAttribDivisor)
+		GL_PROC_VITA(glColorMaski)
+		GL_PROC_VITA(glSampleMaski)
+		GL_PROC_VITA(glDebugMessageCallback)
+		GL_PROC_VITA(glDebugMessageControl)
+		GL_PROC_VITA(glStringMarkerGREMEDY)
+	#undef GL_PROC_VITA
+#endif
 
 	/* Weeding out the GeForce FX cards... */
 	if (!renderer->supports_BaseGL)
