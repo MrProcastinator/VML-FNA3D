@@ -5944,6 +5944,9 @@ static uint8_t OPENGL_PrepareWindowAttributes(uint32_t *flags)
 		(SDL_strcmp(osVersion, "Android") == 0) ||
 		(SDL_strcmp(osVersion, "Emscripten") == 0)
 	);
+	forceES2 |= (
+		(SDL_strcmp(osVersion, "PlayStation Vita") == 0)
+	);
 
 	/* Window depth format */
 	depthSize = 24;
