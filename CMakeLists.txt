@@ -162,9 +162,16 @@ else()
 	)
 endif()
 
+set(FNA3D_LIBRARY_NAME FNA3D)
+set(MOJOSHADER_LIBRARY_NAME mojoshader)
+
 # PSVita VML C flags
 if(VITA)
-	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -marm -mtune=cortex-a9 -mfpu=neon -Wno-incompatible-pointer-types -Wno-stringop-overflow -Wno-deprecated-declarations -Wl,-q -O3 -Wall")
+	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O3 -ftree-vectorize -fno-optimize-sibling-calls")
+	if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+		set(FNA3D_LIBRARY_NAME FNA3D_debug)
+		set(MOJOSHADER_LIBRARY_NAME mojoshader_debug)
+	endif()
 endif()
 
 # Source lists
@@ -236,10 +243,13 @@ if(MINGW)
 endif()
 
 # Soname
-set_target_properties(FNA3D PROPERTIES OUTPUT_NAME "FNA3D"
+set_target_properties(FNA3D PROPERTIES OUTPUT_NAME ${FNA3D_LIBRARY_NAME}
 	VERSION ${LIB_VERSION}
 	SOVERSION ${LIB_MAJOR_VERSION}
 )
+
+# Mojoshader name
+set_target_properties(mojoshader PROPERTIES OUTPUT_NAME ${MOJOSHADER_LIBRARY_NAME})
 
 # Internal Dependencies
 target_link_libraries(FNA3D PRIVATE mojoshader ${LOBJC})
